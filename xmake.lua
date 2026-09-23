@@ -8,7 +8,10 @@ local _gdep_tooldir = os.scriptdir()
 -- consuming project fail before `xmake gdep` has installed that dependency.
 -- Paths are resolved from the consuming project's root directory.
 function gdep_include(filepath)
-    assert(filepath and #filepath > 0, "gdep_include: filepath is required")
+    if not filepath or #filepath == 0 then
+        cprint("${yellow}gdep: skip empty include path${clear}")
+        return false
+    end
     local fullpath = path.absolute(filepath, os.projectdir())
     if os.isfile(fullpath) then
         includes(fullpath)
