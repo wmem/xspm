@@ -1,6 +1,5 @@
 import("core.base.json")
 
-local _M = {}
 local _LOCK_VERSION = 1
 local _MANIFEST_NAME = "gdep.lua"
 local _LOCK_NAME = "gdep.lock"
@@ -342,7 +341,7 @@ local function _sync_manifest(ctx, manifest_path, logical_parent, stack)
     end
 end
 
-function _M.run(opt)
+function run(opt)
     opt = opt or {}
     local projectdir = os.projectdir()
     local manifest_path = path.join(projectdir, _MANIFEST_NAME)
@@ -383,4 +382,3 @@ function _M.run(opt)
     cprint("${green}gdep: synchronized %d dependencies${clear}", #table.keys(ctx.resolved))
 end
 
-return _M
