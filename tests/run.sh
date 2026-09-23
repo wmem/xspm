@@ -28,6 +28,14 @@ make_remote() {
 make_remote leaf
 make_remote parent
 
+cat >"$BASE/src/leaf/xmake.lua" <<'XMAKE'
+target("leaf_from_gdep")
+    set_kind("phony")
+XMAKE
+git -C "$BASE/src/leaf" add xmake.lua
+git -C "$BASE/src/leaf" commit -q -m xmake
+git -C "$BASE/src/leaf" push -q origin main
+
 cat >"$BASE/src/parent/gdep.lua" <<MANIFEST
 return {
     dependencies = {
@@ -38,6 +46,7 @@ MANIFEST
 cat >"$BASE/src/parent/xmake.lua" <<'XMAKE'
 target("from_gdep")
     set_kind("phony")
+gdep_include("gdeps/leaf/xmake.lua")
 XMAKE
 git -C "$BASE/src/parent" add gdep.lua xmake.lua
 git -C "$BASE/src/parent" commit -q -m recursive
@@ -65,7 +74,9 @@ MANIFEST
 (cd "$BASE/project" && "$XMAKE_BIN" gdep >/dev/null)
 test -d "$BASE/project/gdeps/parent/.git"
 test -d "$BASE/project/gdeps/parent/gdeps/leaf/.git"
-(cd "$BASE/project" && "$XMAKE_BIN" show -l targets | grep -q from_gdep)
+TARGETS=$(cd "$BASE/project" && "$XMAKE_BIN" show -l targets)
+grep -q from_gdep <<<"$TARGETS"
+grep -q leaf_from_gdep <<<"$TARGETS"
 (cd "$BASE/project" && "$XMAKE_BIN" gdep >/dev/null)
 
 # Manager-owned nested gdeps must not count as source dirtiness.
