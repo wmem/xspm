@@ -11,7 +11,7 @@ function gdep_include(filepath)
     if not filepath or #filepath == 0 then
         return false
     end
-    local fullpath = path.absolute(filepath, os.projectdir())
+    local fullpath = path.absolute(filepath, os.scriptdir())
     if os.isfile(fullpath) then
         includes(fullpath)
         return true
