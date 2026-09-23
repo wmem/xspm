@@ -22,11 +22,23 @@ local function _git_in(repo, args)
 end
 
 local function _try_git_in(repo, args)
-    local ok, out, err = pcall(_git_in, repo, args)
+    local ok = false
+    local out, err, errors
+    try {
+        function ()
+            out, err = _git_in(repo, args)
+            ok = true
+        end,
+        catch {
+            function (e)
+                errors = e
+            end
+        }
+    }
     if ok then
         return true, out, err
     end
-    return false, nil, out
+    return false, nil, errors
 end
 
 local function _manifest_load(filepath)
@@ -351,8 +363,8 @@ function run(opt)
     end
 
     -- Fail early with a useful message if git is unavailable.
-    local ok = pcall(_git, {"--version"})
-    if not ok then
+    local git_ok = try {function () _git({"--version"}); return true end}
+    if not git_ok then
         raise("gdep: git executable is required")
     end
 
