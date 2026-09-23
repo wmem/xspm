@@ -59,10 +59,12 @@ set_project("gdep-test")
 includes("tools/gdep/xmake.lua")
 gdep_include("gdeps/parent/xmake.lua")
 XMAKE
+FIXED_LEAF=$(git -C "$BASE/src/leaf" rev-parse HEAD)
 cat >"$BASE/project/gdep.lua" <<MANIFEST
 return {
     dependencies = {
-        parent = "file://$BASE/remotes/parent.git#main"
+        parent = "file://$BASE/remotes/parent.git#main",
+        fixed_leaf = "file://$BASE/remotes/leaf.git#$FIXED_LEAF"
     }
 }
 MANIFEST
@@ -74,6 +76,7 @@ MANIFEST
 (cd "$BASE/project" && "$XMAKE_BIN" gdep >/dev/null)
 test -d "$BASE/project/gdeps/parent/.git"
 test -d "$BASE/project/gdeps/parent/gdeps/leaf/.git"
+test "$(git -C "$BASE/project/gdeps/fixed_leaf" rev-parse HEAD)" = "$FIXED_LEAF"
 TARGETS=$(cd "$BASE/project" && "$XMAKE_BIN" show -l targets)
 grep -q from_gdep <<<"$TARGETS"
 grep -q leaf_from_gdep <<<"$TARGETS"
