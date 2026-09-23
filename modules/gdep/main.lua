@@ -191,11 +191,29 @@ end
 local function _fetch_ref(repo, ref)
     cprint("${dim}gdep: fetch %s (%s)${clear}", repo, ref)
     local ok, _, errors = _try_git_in(repo, {"fetch", "--force", "--tags", "origin", ref})
-    if not ok then
-        raise("gdep: cannot fetch ref '%s' in %s: %s", ref, repo, tostring(errors))
+    if ok then
+        local out = _git_in(repo, {"rev-parse", "--verify", "FETCH_HEAD^{commit}"})
+        return _trim(out)
     end
-    local out = _git_in(repo, {"rev-parse", "--verify", "FETCH_HEAD^{commit}"})
-    return _trim(out)
+
+    -- Some servers do not allow fetching an arbitrary commit object by SHA.
+    -- Fetch the configured refs and resolve the requested value locally as a
+    -- fallback. A clone normally has the default origin fetch refspec.
+    local fetched = _try_git_in(repo, {"fetch", "--force", "--tags", "origin"})
+    if fetched then
+        local candidates = {ref, "origin/" .. ref}
+        local branch = ref:match("^refs/heads/(.+)$")
+        if branch then
+            table.insert(candidates, "refs/remotes/origin/" .. branch)
+        end
+        for _, candidate in ipairs(candidates) do
+            local resolved, out = _try_git_in(repo, {"rev-parse", "--verify", candidate .. "^{commit}"})
+            if resolved then
+                return _trim(out)
+            end
+        end
+    end
+    raise("gdep: cannot resolve ref '%s' in %s: %s", ref, repo, tostring(errors))
 end
 
 local function _ensure_locked_commit(repo, dep, commit)
@@ -312,9 +330,13 @@ local function _lock_commit(ctx, logical, dep)
     return entry.commit
 end
 
-local function _sync_manifest(ctx, manifest_path, logical_parent, stack)
+local function _sync_manifest(ctx, manifest_path, logical_parent, stack, depth)
     if not os.isfile(manifest_path) then
         return
+    end
+    depth = depth or 0
+    if depth > 64 then
+        raise("gdep: dependency recursion is deeper than 64 levels near %s", manifest_path)
     end
     local manifest = _manifest_load(manifest_path)
     local manifest_dir = path.directory(manifest_path)
@@ -328,7 +350,7 @@ local function _sync_manifest(ctx, manifest_path, logical_parent, stack)
             end
         end
 
-        local cloned = _ensure_repo(repo, dep, ctx.force)
+        _ensure_repo(repo, dep, ctx.force)
         local commit = _lock_commit(ctx, logical, dep)
         if commit then
             _ensure_locked_commit(repo, dep, commit)
@@ -346,9 +368,7 @@ local function _sync_manifest(ctx, manifest_path, logical_parent, stack)
                 table.insert(child_stack, value)
             end
             table.insert(child_stack, dep.git)
-            _sync_manifest(ctx, child_manifest, logical, child_stack)
-        elseif cloned then
-            -- no-op; the branch is intentionally explicit for readable logs
+            _sync_manifest(ctx, child_manifest, logical, child_stack, depth + 1)
         end
     end
 end
@@ -386,7 +406,7 @@ function run(opt)
         cprint("${dim}gdep: no lock file; resolving refs from remotes${clear}")
     end
 
-    _sync_manifest(ctx, manifest_path, "", {})
+    _sync_manifest(ctx, manifest_path, "", {}, 0)
 
     if opt.lock or (lock_data and opt.update) then
         _save_lock(lock_path, ctx.resolved)
