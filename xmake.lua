@@ -9,7 +9,6 @@ local _gdep_tooldir = os.scriptdir()
 -- Paths are resolved from the consuming project's root directory.
 function gdep_include(filepath)
     if not filepath or #filepath == 0 then
-        cprint("${yellow}gdep: skip empty include path${clear}")
         return false
     end
     local fullpath = path.absolute(filepath, os.projectdir())
@@ -17,7 +16,6 @@ function gdep_include(filepath)
         includes(fullpath)
         return true
     end
-    cprint("${yellow}gdep: skip missing include %s (run `xmake gdep`)${clear}", filepath)
     return false
 end
 
