@@ -211,6 +211,24 @@ if (cd "$BASE/project" && "$XMAKE_BIN" xspm >/dev/null 2>&1); then
     echo "expected origin mismatch failure" >&2
     exit 1
 fi
+git -C "$BASE/project/deps/parent" remote set-url origin "file://$BASE/remotes/parent.git"
+
+# Full update, full reinit and full clean forms are supported.
+push_change parent parent-update-all
+LATEST_PARENT=$(git -C "$BASE/src/parent" rev-parse HEAD)
+(cd "$BASE/project" && "$XMAKE_BIN" xspm --update >/dev/null)
+test "$(git -C "$BASE/project/deps/parent" rev-parse HEAD)" = "$LATEST_PARENT"
+COUNT=$(cat "$BASE/project/hook-count.txt")
+(cd "$BASE/project" && "$XMAKE_BIN" xspm --reinit >/dev/null)
+test "$(cat "$BASE/project/hook-count.txt")" = "$((COUNT + 1))"
+LOCK_BEFORE=$(sha256sum "$BASE/project/xspm-lock.json" | awk '{print $1}')
+(cd "$BASE/project" && "$XMAKE_BIN" xspm --clean >/dev/null)
+test ! -e "$BASE/project/deps/parent"
+test ! -e "$BASE/project/vendor/fixed_leaf"
+test "$(sha256sum "$BASE/project/xspm-lock.json" | awk '{print $1}')" = "$LOCK_BEFORE"
+(cd "$BASE/project" && "$XMAKE_BIN" xspm >/dev/null)
+test -d "$BASE/project/deps/parent/deps/leaf/.git"
+test -d "$BASE/project/vendor/fixed_leaf/.git"
 
 # Invalid escaping install paths are rejected before cloning.
 cat >"$BASE/project/xspm.json" <<MANIFEST

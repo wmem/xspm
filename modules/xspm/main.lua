@@ -656,10 +656,14 @@ end
 local function _state_nodes(ctx)
     local nodes = {}
     for key, entry in pairs(ctx.state.packages) do
+        local safe_key = _normalize_rel(key, "package path in xspm state")
+        if safe_key ~= key:gsub("\\", "/") then
+            raise("xspm: invalid package path in state: %s", key)
+        end
         table.insert(nodes, {
-            key = key,
+            key = safe_key,
             name = entry.name,
-            repo = path.absolute(path.join(ctx.projectdir, key)),
+            repo = path.absolute(path.join(ctx.projectdir, safe_key)),
             entry = entry
         })
     end
