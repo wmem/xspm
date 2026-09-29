@@ -48,7 +48,9 @@ local function _json_string(value)
     if not encoded then
         raise("xspm: cannot encode json value: %s", errors or "json error")
     end
-    return encoded
+    -- xmake's JSON encoder escapes forward slashes. They are valid JSON but
+    -- make source URLs and path keys unnecessarily hard to read in lock/state files.
+    return encoded:gsub("\\/", "/")
 end
 
 local function _normalize_rel(value, label)
