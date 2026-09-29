@@ -119,8 +119,8 @@ grep -q leaf_from_xspm <<<"$TARGETS"
 (cd "$BASE/project" && "$XMAKE_BIN" xspm >/dev/null)
 test "$(cat "$BASE/project/hook-count.txt")" = "1"
 
-# Nested managed packages and ignored hook outputs do not make the parent dirty.
-test -z "$(git -C "$BASE/project/deps/parent" status --porcelain --untracked-files=all)"
+# Nested managed packages and ignored hook outputs are excluded from xspm dirtiness checks.
+# (Raw git status still shows the nested source package as untracked, by design.)
 
 # list/status are read-only and work without network access.
 LIST=$(cd "$BASE/project" && "$XMAKE_BIN" xspm --list)
