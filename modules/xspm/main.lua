@@ -629,7 +629,7 @@ local function _do_list(ctx, manifest_path)
         local depth = 0
         for _ in node.logical:gmatch("/") do depth = depth + 1 end
         local prefix = string.rep("  ", depth)
-        print(string.format("%s%s  %s#%s  -> %s%s", prefix, node.name, node.dep.git, node.dep.ref,
+        print(string.format("%s%s  %s#%s  -> %s%s", prefix, node.logical, node.dep.git, node.dep.ref,
             node.key, commit and (" @ " .. commit:sub(1, 12)) or ""))
     end
 end
