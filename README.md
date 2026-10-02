@@ -40,6 +40,8 @@ Create `xspm.json` in the project root:
 
 The string form is shorthand for a Git source and uses `<installDir>/<name>` as its install path. `installDir` defaults to `deps`.
 
+Git sources accept HTTPS, SSH, `file://` URLs, and local repository paths, for example `/share/repos/hal.git#main` or `../hal#main`. Relative local source paths are resolved from the directory containing the declaring `xspm.json`, including nested manifests. Lock and state files retain the declared source string. Local sources supply committed files; uncommitted working-tree changes are not installed.
+
 A package can override its path with `path`. All install paths are relative to the directory containing the current `xspm.json`; absolute paths and `..` escapes are rejected.
 
 If an installed package contains its own `xspm.json`, that manifest is processed recursively. The child manifest's paths are relative to that package root. xspm does not perform dependency hoisting or build-target dependency resolution.
@@ -60,7 +62,7 @@ function on_install(ctx)
 end
 ```
 
-`on_install()` runs after the package and its recursively declared child source packages are synchronized. It runs once for each resolved commit. Successful initialization is recorded in:
+`on_install()` runs after the package and its recursively declared child source packages are synchronized. It runs once for each resolved commit in an installed working tree. A newly cloned working tree is initialized again, even if an earlier installation of the same commit remains in the state file. Successful initialization is recorded in:
 
 ```text
 .xspm/state/packages.json
@@ -73,6 +75,8 @@ The top-level project should normally ignore `.xspm/` in its own `.gitignore`.
 ## Lock file
 
 `xspm-lock.json` is optional. Without it, a normal `xmake xspm` resolves declared refs from Git remotes. With it, a normal sync uses the exact recorded commits and avoids remote access when those commits are already available locally.
+
+Missing remote branches or tags cause resolution to fail instead of falling back to stale local refs. Full and unambiguous abbreviated commit hashes are supported. When a lock file exists, `--status` reports a missing package entry as `lock-missing` and exits with an error.
 
 The lock records the complete recursively resolved package graph, keyed by actual install path. A nested package's own `xspm-lock.json` is not used while it is being consumed as a dependency; the top-level project's lock controls the resolved graph.
 
@@ -117,11 +121,13 @@ xmake xspm --clean [PACKAGE]
 
 xmake 3.1.1 task options do not support one option being both a bare flag and an optional `--name=value` option. Therefore single-package operations use a positional selector, for example `xmake xspm --update hal`, rather than `--update=hal`.
 
+If an obsolete package directory still contains a currently declared package, `--prune` refuses to remove it, including with `--force`. Move the declared package to another install path before pruning the obsolete parent directory.
+
 ## Existing package checks
 
 Every normal synchronization checks existing package directories. A managed package must:
 
-- be a Git worktree;
+- be the root of a Git worktree, rather than an ordinary directory inside another repository;
 - have the expected `origin` URL;
 - have no unmanaged local source changes unless `--force` is used;
 - converge to the desired commit.

@@ -34,6 +34,13 @@ push_change() {
     git -C "$BASE/src/$name" push -q origin main
 }
 
+expect_no_match() {
+    if grep -q "$1" "$2"; then
+        echo "unexpected match '$1' in $2" >&2
+        exit 1
+    fi
+}
+
 make_remote leaf
 make_remote parent
 make_remote extra
@@ -79,7 +86,8 @@ git -C "$BASE/src/parent" commit -q -m recursive
 git -C "$BASE/src/parent" push -q origin main
 
 mkdir -p "$BASE/project/tools"
-git clone -q "$ROOT" "$BASE/project/tools/xspm"
+mkdir -p "$BASE/project/tools/xspm"
+cp -R "$ROOT/xmake.lua" "$ROOT/modules" "$BASE/project/tools/xspm/"
 cat >"$BASE/project/xmake.lua" <<'XMAKE'
 set_project("xspm-test")
 includes("tools/xspm/xmake.lua")
@@ -112,7 +120,7 @@ test -d "$BASE/project/vendor/fixed_leaf/.git"
 test -d "$BASE/project/deps/extra/.git"
 test -f "$BASE/project/.xspm/state/packages.json"
 test "$(cat "$BASE/project/hook-count.txt")" = "1"
-test "$(cat "$BASE/project/deps/parent/generated/commit.txt" | tr -d '\n')" = "$(git -C "$BASE/project/deps/parent" rev-parse HEAD)"
+test "$(tr -d '\n' <"$BASE/project/deps/parent/generated/commit.txt")" = "$(git -C "$BASE/project/deps/parent" rev-parse HEAD)"
 TARGETS=$(cd "$BASE/project" && "$XMAKE_BIN" show -l targets)
 grep -q from_xspm <<<"$TARGETS"
 grep -q leaf_from_xspm <<<"$TARGETS"
@@ -151,7 +159,7 @@ if (cd "$BASE/project" && "$XMAKE_BIN" xspm >/dev/null 2>&1); then
     exit 1
 fi
 (cd "$BASE/project" && "$XMAKE_BIN" xspm --force >/dev/null)
-! grep -q dirty "$BASE/project/deps/parent/data.txt"
+expect_no_match dirty "$BASE/project/deps/parent/data.txt"
 test -d "$BASE/project/deps/parent/deps/leaf/.git"
 
 # Reinitialize a single package without changing its commit.
@@ -193,8 +201,8 @@ with open(p, "w") as f:
 PY
 (cd "$BASE/project" && "$XMAKE_BIN" xspm --prune >/dev/null)
 test ! -e "$BASE/project/deps/extra"
-! grep -q 'deps/extra' "$BASE/project/xspm-lock.json"
-! grep -q 'deps/extra' "$BASE/project/.xspm/state/packages.json"
+expect_no_match 'deps/extra' "$BASE/project/xspm-lock.json"
+expect_no_match 'deps/extra' "$BASE/project/.xspm/state/packages.json"
 
 # Clean a package removes its nested package subtree but preserves the lock.
 LOCK_BEFORE=$(sha256sum "$BASE/project/xspm-lock.json" | awk '{print $1}')
@@ -244,4 +252,5 @@ if (cd "$BASE/project" && "$XMAKE_BIN" xspm >/dev/null 2>&1); then
     exit 1
 fi
 
+bash "$ROOT/tests/regressions.sh"
 echo "xspm tests passed"

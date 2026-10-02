@@ -121,6 +121,15 @@ local function _split_source(source, manifest, name)
     return git, ref
 end
 
+local function _git_source(source, basedir)
+    -- URL 和 scp 风格的 SSH 地址交给 Git；本地路径按声明目录解析。
+    if source:match("^%a[%w+.-]*://") or
+        (source:match("^[^/\\]+:") and not source:match("^%a:[/\\]")) then
+        return source
+    end
+    return path.absolute(source, basedir)
+end
+
 local function _normalize_dep(name, value, manifest_data, manifest_path)
     _validate_name(name, manifest_path)
     local git, ref, install_rel
@@ -142,7 +151,8 @@ local function _normalize_dep(name, value, manifest_data, manifest_path)
         raise("xspm: dependency '%s' in %s must be a string or object", name, manifest_path)
     end
     install_rel = _normalize_rel(install_rel, "path for dependency '" .. name .. "' in " .. manifest_path)
-    return {name = name, git = git, ref = ref, install_rel = install_rel}
+    return {name = name, git = git, git_source = _git_source(git, path.directory(manifest_path)),
+        ref = ref, install_rel = install_rel}
 end
 
 local function _sorted_dependencies(manifest_data, manifest_path)
@@ -171,7 +181,8 @@ local function _path_key(projectdir, repo)
 end
 
 local function _is_git_repo(repo)
-    local ok, out = _try_git_in(repo, {"rev-parse", "--is-inside-work-tree"})
+    -- 仓库根目录的 prefix 为空；普通子目录不能继承上层仓库身份。
+    local ok, out = _try_git_in(repo, {"rev-parse", "--is-inside-work-tree", "--show-prefix"})
     return ok and _trim(out) == "true"
 end
 
@@ -226,7 +237,7 @@ local function _prepare_existing(repo, dep, force)
     if not remote then
         raise("xspm: %s has no origin remote", repo)
     end
-    if remote ~= dep.git then
+    if _git_source(remote, repo) ~= dep.git_source then
         raise("xspm: origin mismatch for '%s': expected '%s', got '%s'", dep.name, dep.git, remote)
     end
     local dirty = _status_text(repo)
@@ -250,7 +261,8 @@ local function _ensure_repo(repo, dep, force)
     end
     os.mkdir(path.directory(repo))
     cprint("${cyan}xspm: clone %s -> %s${clear}", dep.git, repo)
-    _git({"clone", "--no-checkout", "--origin", "origin", dep.git, repo})
+    -- 初始检出保证后续 ref/锁解析失败时，重试不会把未检出文件误判为本地删除。
+    _git({"clone", "--origin", "origin", dep.git_source, repo})
     return true
 end
 
@@ -267,17 +279,22 @@ local function _fetch_ref(repo, ref)
         return _trim(out)
     end
 
-    local fetched = _try_git_in(repo, {"fetch", "--force", "--tags", "origin"})
-    if fetched then
-        local candidates = {ref, "origin/" .. ref}
-        local branch = ref:match("^refs/heads/(.+)$")
-        if branch then
-            table.insert(candidates, "refs/remotes/origin/" .. branch)
-        end
-        for _, candidate in ipairs(candidates) do
-            local resolved, out = _try_git_in(repo, {"rev-parse", "--verify", candidate .. "^{commit}"})
+    -- 仅提交哈希可以在完整 fetch 后从对象库解析，不能使用残留分支或 tag。
+    if #ref >= 4 and #ref <= 64 and ref:match("^%x+$") then
+        local fetched = _try_git_in(repo, {"fetch", "--force", "--tags", "origin"})
+        if fetched then
+            local resolved, out = _try_git_in(repo, {"rev-parse", "--disambiguate=" .. ref})
             if resolved then
-                return _trim(out)
+                local objects = {}
+                for object in out:gmatch("[^\r\n]+") do
+                    table.insert(objects, object)
+                end
+                if #objects == 1 then
+                    local commit_ok, commit = _try_git_in(repo, {"rev-parse", "--verify", objects[1] .. "^{commit}"})
+                    if commit_ok then
+                        return _trim(commit)
+                    end
+                end
             end
         end
     end
@@ -499,6 +516,11 @@ local function _sync_manifest(ctx, manifest_path, logical_parent, stack, depth, 
         end
 
         local created = _ensure_repo(repo, dep, ctx.force)
+        if created and ctx.state.packages[key] then
+            -- 新工作区不能复用旧初始化状态；持久化以便后续失败重试也能正确初始化。
+            ctx.state.packages[key] = nil
+            _save_state(ctx.state_path, ctx.state.packages)
+        end
         local commit
         if refresh_this then
             commit = _fetch_ref(repo, dep.ref)
@@ -574,7 +596,7 @@ local function _package_local_status(ctx, node)
         return "not-git", nil
     end
     local remote = _remote_url(repo)
-    if remote ~= dep.git then
+    if not remote or _git_source(remote, repo) ~= dep.git_source then
         return "origin-mismatch", _head(repo)
     end
     local dirty = _status_text(repo)
@@ -583,6 +605,9 @@ local function _package_local_status(ctx, node)
     end
     local head = _head(repo)
     local locked = ctx.lock_data and ctx.lock_data.packages[key]
+    if ctx.lock_data and not locked then
+        return "lock-missing", head
+    end
     if locked then
         if locked.source ~= dep.git or locked.ref ~= dep.ref or locked.name ~= dep.name then
             return "lock-mismatch", head
@@ -729,6 +754,12 @@ local function _do_prune(ctx, manifest_path)
         end
     end
     for _, node in ipairs(stale) do
+        for desired_key, _ in pairs(ctx.desired) do
+            if desired_key:sub(1, #node.key + 1) == node.key .. "/" then
+                raise("xspm: cannot prune '%s': it contains declared package '%s'; move that package first",
+                    node.key, desired_key)
+            end
+        end
         _validate_removal(node.repo, node.name, ctx.force)
     end
     for _, node in ipairs(stale) do
