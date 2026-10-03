@@ -86,11 +86,18 @@ local function _manifest_load(filepath)
     if data.version ~= nil and data.version ~= _FORMAT_VERSION then
         raise("xspm: unsupported manifest version in %s: %s", filepath, tostring(data.version))
     end
-    if data.dependencies == nil then
-        data.dependencies = {}
+    for _, field in ipairs({"dependencies", "devDependencies"}) do
+        if data[field] == nil then
+            data[field] = {}
+        end
+        if type(data[field]) ~= "table" then
+            raise("xspm: %s in %s must be an object", field, filepath)
+        end
     end
-    if type(data.dependencies) ~= "table" then
-        raise("xspm: dependencies in %s must be an object", filepath)
+    for name, _ in pairs(data.devDependencies) do
+        if data.dependencies[name] ~= nil then
+            raise("xspm: dependency '%s' is declared in both dependencies and devDependencies in %s", name, filepath)
+        end
     end
     data.installDir = _normalize_rel(data.installDir or _DEFAULT_INSTALL_DIR, "installDir in " .. filepath)
     return data
@@ -155,17 +162,47 @@ local function _normalize_dep(name, value, manifest_data, manifest_path)
         ref = ref, install_rel = install_rel}
 end
 
-local function _sorted_dependencies(manifest_data, manifest_path)
-    local names = {}
-    for name, _ in pairs(manifest_data.dependencies) do
-        table.insert(names, name)
-    end
-    table.sort(names)
+local function _sorted_dependencies(manifest_data, manifest_path, include_dev)
     local deps = {}
-    for _, name in ipairs(names) do
-        table.insert(deps, _normalize_dep(name, manifest_data.dependencies[name], manifest_data, manifest_path))
+    local all = {}
+    for _, field in ipairs({"dependencies", "devDependencies"}) do
+        for name, value in pairs(manifest_data[field]) do
+            local dep = _normalize_dep(name, value, manifest_data, manifest_path)
+            dep.dev = field == "devDependencies"
+            table.insert(all, dep)
+            if not dep.dev or include_dev then
+                table.insert(deps, dep)
+            end
+        end
     end
+    -- 两类根目录不能互相包含，否则跳过开发依赖时无法安全同步或清理。
+    for i, a in ipairs(all) do
+        for j = i + 1, #all do
+            local b = all[j]
+            if a.dev ~= b.dev and (a.install_rel == b.install_rel or
+                a.install_rel:sub(1, #b.install_rel + 1) == b.install_rel .. "/" or
+                b.install_rel:sub(1, #a.install_rel + 1) == a.install_rel .. "/") then
+                raise("xspm: dependency paths overlap across dependencies and devDependencies: '%s' and '%s' in %s",
+                    a.name, b.name, manifest_path)
+            end
+        end
+    end
+    table.sort(deps, function (a, b) return a.name < b.name end)
     return deps
+end
+
+local function _is_under(key, root)
+    return key == root or key:sub(1, #root + 1) == root .. "/"
+end
+
+local function _is_development_key(ctx, key, entry)
+    -- 当前根清单优先于旧元数据，支持两类依赖之间迁移及旧锁文件升级。
+    for _, dep in ipairs(ctx.root_dependencies) do
+        if _is_under(key, dep.install_rel) then
+            return dep.dev
+        end
+    end
+    return entry and entry.dev == true or false
 end
 
 local function _logical_child(parent, name)
@@ -387,8 +424,9 @@ local function _save_lock(filepath, entries)
         local e = entries[key]
         local comma = i < #keys and "," or ""
         table.insert(lines, string.format(
-            "    %s: {\"name\": %s, \"source\": %s, \"ref\": %s, \"commit\": %s}%s",
-            _json_string(key), _json_string(e.name), _json_string(e.source), _json_string(e.ref), _json_string(e.commit), comma))
+            "    %s: {\"name\": %s, \"source\": %s, \"ref\": %s, \"commit\": %s%s}%s",
+            _json_string(key), _json_string(e.name), _json_string(e.source), _json_string(e.ref), _json_string(e.commit),
+            e.dev and ', "dev": true' or "", comma))
     end
     table.insert(lines, "  }")
     table.insert(lines, "}")
@@ -405,9 +443,9 @@ local function _save_state(filepath, entries)
         local e = entries[key]
         local comma = i < #keys and "," or ""
         table.insert(lines, string.format(
-            "    %s: {\"name\": %s, \"source\": %s, \"ref\": %s, \"commit\": %s, \"initialized\": %s}%s",
+            "    %s: {\"name\": %s, \"source\": %s, \"ref\": %s, \"commit\": %s, \"initialized\": %s%s}%s",
             _json_string(key), _json_string(e.name), _json_string(e.source), _json_string(e.ref),
-            _json_string(e.commit), e.initialized and "true" or "false", comma))
+            _json_string(e.commit), e.initialized and "true" or "false", e.dev and ', "dev": true' or "", comma))
     end
     table.insert(lines, "  }")
     table.insert(lines, "}")
@@ -440,9 +478,13 @@ local function _matches_selector(selector, dep, logical, key)
     return selector == dep.name or selector == logical or selector == key
 end
 
-local function _run_install_hook(ctx, dep, repo, key, commit, force_run)
+local function _run_install_hook(ctx, dep, repo, key, commit, force_run, development)
     local state = ctx.state.packages[key]
     if not force_run and state and state.initialized and state.commit == commit and state.source == dep.git then
+        if (state.dev == true) ~= (development == true) then
+            state.dev = development and true or nil
+            _save_state(ctx.state_path, ctx.state.packages)
+        end
         return false
     end
 
@@ -471,7 +513,8 @@ local function _run_install_hook(ctx, dep, repo, key, commit, force_run)
         source = dep.git,
         ref = dep.ref,
         commit = commit,
-        initialized = true
+        initialized = true,
+        dev = development and true or nil
     }
     _save_state(ctx.state_path, ctx.state.packages)
     return os.isfile(hookpath)
@@ -486,7 +529,7 @@ local function _register_path(ctx, repo, logical)
     ctx.paths[normalized] = logical
 end
 
-local function _sync_manifest(ctx, manifest_path, logical_parent, stack, depth, refresh_parent)
+local function _sync_manifest(ctx, manifest_path, logical_parent, stack, depth, refresh_parent, development)
     if not os.isfile(manifest_path) then
         return
     end
@@ -497,7 +540,8 @@ local function _sync_manifest(ctx, manifest_path, logical_parent, stack, depth, 
 
     local manifest = _manifest_load(manifest_path)
     local manifest_dir = path.directory(manifest_path)
-    for _, dep in ipairs(_sorted_dependencies(manifest, manifest_path)) do
+    for _, dep in ipairs(_sorted_dependencies(manifest, manifest_path, depth == 0 and not ctx.no_dev)) do
+        local is_dev = development or dep.dev
         local logical = _logical_child(logical_parent, dep.name)
         local repo = path.absolute(path.join(manifest_dir, dep.install_rel))
         local key = _path_key(ctx.projectdir, repo)
@@ -539,8 +583,8 @@ local function _sync_manifest(ctx, manifest_path, logical_parent, stack, depth, 
         end
 
         _checkout(repo, dep, commit)
-        ctx.resolved[key] = {name = dep.name, source = dep.git, ref = dep.ref, commit = commit}
-        ctx.desired[key] = {name = dep.name, repo = repo, logical = logical, dep = dep, commit = commit}
+        ctx.resolved[key] = {name = dep.name, source = dep.git, ref = dep.ref, commit = commit, dev = is_dev and true or nil}
+        ctx.desired[key] = {name = dep.name, repo = repo, logical = logical, dep = dep, commit = commit, dev = is_dev}
 
         local child_manifest = path.join(repo, _MANIFEST_NAME)
         if os.isfile(child_manifest) then
@@ -549,16 +593,16 @@ local function _sync_manifest(ctx, manifest_path, logical_parent, stack, depth, 
                 table.insert(child_stack, value)
             end
             table.insert(child_stack, dep.git)
-            _sync_manifest(ctx, child_manifest, logical, child_stack, depth + 1, refresh_this)
+            _sync_manifest(ctx, child_manifest, logical, child_stack, depth + 1, refresh_this, is_dev)
         end
 
         -- Initialization is a post-install hook: child source packages are in
         -- place before a package's hook runs.
-        _run_install_hook(ctx, dep, repo, key, commit, false)
+        _run_install_hook(ctx, dep, repo, key, commit, false, is_dev)
     end
 end
 
-local function _collect_manifest_tree(ctx, manifest_path, logical_parent, depth)
+local function _collect_manifest_tree(ctx, manifest_path, logical_parent, depth, development)
     if not os.isfile(manifest_path) then
         return
     end
@@ -568,20 +612,21 @@ local function _collect_manifest_tree(ctx, manifest_path, logical_parent, depth)
     end
     local manifest = _manifest_load(manifest_path)
     local manifest_dir = path.directory(manifest_path)
-    for _, dep in ipairs(_sorted_dependencies(manifest, manifest_path)) do
+    for _, dep in ipairs(_sorted_dependencies(manifest, manifest_path, depth == 0 and not ctx.no_dev)) do
+        local is_dev = development or dep.dev
         local logical = _logical_child(logical_parent, dep.name)
         local repo = path.absolute(path.join(manifest_dir, dep.install_rel))
         local key = _path_key(ctx.projectdir, repo)
         if ctx.desired[key] then
             raise("xspm: package path collision while reading manifests: %s", repo)
         end
-        local node = {name = dep.name, repo = repo, key = key, logical = logical, dep = dep}
+        local node = {name = dep.name, repo = repo, key = key, logical = logical, dep = dep, dev = is_dev}
         ctx.desired[key] = node
         table.insert(ctx.order, node)
         if os.isdir(repo) then
             local child_manifest = path.join(repo, _MANIFEST_NAME)
             if os.isfile(child_manifest) then
-                _collect_manifest_tree(ctx, child_manifest, logical, depth + 1)
+                _collect_manifest_tree(ctx, child_manifest, logical, depth + 1, is_dev)
             end
         end
     end
@@ -628,15 +673,15 @@ end
 
 local function _do_status(ctx, manifest_path)
     _collect_manifest_tree(ctx, manifest_path, "", 0)
-    cprint("${bright}PACKAGE  REF  STATUS  COMMIT  PATH${clear}")
+    cprint("${bright}PACKAGE  REF  STATUS  COMMIT  PATH  SCOPE${clear}")
     local bad = 0
     for _, node in ipairs(ctx.order) do
         local status, head = _package_local_status(ctx, node)
         if status ~= "ok" and status ~= "unlocked" then
             bad = bad + 1
         end
-        print(string.format("%s  %s  %s  %s  %s", node.logical, node.dep.ref, status,
-            head and head:sub(1, 12) or "-", node.key))
+        print(string.format("%s  %s  %s  %s  %s  %s", node.logical, node.dep.ref, status,
+            head and head:sub(1, 12) or "-", node.key, node.dev and "dev" or "normal"))
     end
     if bad > 0 then
         raise("xspm: %d package(s) require attention", bad)
@@ -656,8 +701,8 @@ local function _do_list(ctx, manifest_path)
         local depth = 0
         for _ in node.logical:gmatch("/") do depth = depth + 1 end
         local prefix = string.rep("  ", depth)
-        print(string.format("%s%s  %s#%s  -> %s%s", prefix, node.logical, node.dep.git, node.dep.ref,
-            node.key, commit and (" @ " .. commit:sub(1, 12)) or ""))
+        print(string.format("%s%s  %s#%s  -> %s%s%s", prefix, node.logical, node.dep.git, node.dep.ref,
+            node.key, commit and (" @ " .. commit:sub(1, 12)) or "", node.dev and " [dev]" or ""))
     end
 end
 
@@ -689,6 +734,7 @@ local function _state_nodes(ctx)
             key = safe_key,
             name = entry.name,
             repo = path.absolute(path.join(ctx.projectdir, safe_key)),
+            dev = _is_development_key(ctx, safe_key, entry),
             entry = entry
         })
     end
@@ -701,17 +747,38 @@ local function _state_nodes(ctx)
     return nodes
 end
 
+local function _validate_development_removal(ctx, node)
+    if not ctx.no_dev then
+        return
+    end
+    local function protect(key)
+        if _is_under(key, node.key) then
+            raise("xspm: cannot remove '%s' with --no-dev: it contains development package '%s'", node.key, key)
+        end
+    end
+    for _, dep in ipairs(ctx.root_dependencies) do
+        if dep.dev then
+            protect(dep.install_rel)
+        end
+    end
+    for key, entry in pairs(ctx.state.packages) do
+        if _is_development_key(ctx, key, entry) then
+            protect(key)
+        end
+    end
+end
+
 local function _do_clean(ctx, selector)
     local all = _state_nodes(ctx)
     local roots = {}
     if selector then
         for _, node in ipairs(all) do
-            if selector == node.name or selector == node.key then
+            if not (ctx.no_dev and node.dev) and (selector == node.name or selector == node.key) then
                 table.insert(roots, node.key)
             end
         end
         if #roots == 0 then
-            raise("xspm: package '%s' is not installed", selector)
+            raise("xspm: package '%s' is not installed in the selected dependency scope", selector)
         end
     end
 
@@ -726,12 +793,13 @@ local function _do_clean(ctx, selector)
                 end
             end
         end
-        if remove then
+        if remove and not (ctx.no_dev and node.dev) then
             table.insert(selected, node)
         end
     end
 
     for _, node in ipairs(selected) do
+        _validate_development_removal(ctx, node)
         _validate_removal(node.repo, node.name, ctx.force)
     end
     for _, node in ipairs(selected) do
@@ -749,11 +817,12 @@ local function _do_prune(ctx, manifest_path)
     _collect_manifest_tree(ctx, manifest_path, "", 0)
     local stale = {}
     for _, node in ipairs(_state_nodes(ctx)) do
-        if not ctx.desired[node.key] then
+        if not ctx.desired[node.key] and not (ctx.no_dev and node.dev) then
             table.insert(stale, node)
         end
     end
     for _, node in ipairs(stale) do
+        _validate_development_removal(ctx, node)
         for desired_key, _ in pairs(ctx.desired) do
             if desired_key:sub(1, #node.key + 1) == node.key .. "/" then
                 raise("xspm: cannot prune '%s': it contains declared package '%s'; move that package first",
@@ -774,7 +843,8 @@ local function _do_prune(ctx, manifest_path)
     if ctx.lock_data then
         local kept = {}
         for key, entry in pairs(ctx.lock_data.packages) do
-            if ctx.desired[key] then
+            if ctx.desired[key] or (ctx.no_dev and _is_development_key(ctx, key, entry)) then
+                entry.dev = _is_development_key(ctx, key, entry) and true or nil
                 kept[key] = entry
             end
         end
@@ -795,7 +865,7 @@ local function _do_reinit(ctx, manifest_path, selector)
             end
             _prepare_existing(node.repo, node.dep, ctx.force)
             local commit = _head(node.repo)
-            _run_install_hook(ctx, node.dep, node.repo, node.key, commit, true)
+            _run_install_hook(ctx, node.dep, node.repo, node.key, commit, true, node.dev)
         end
     end
     if selector and matched == 0 then
@@ -832,12 +902,15 @@ function run(opt)
 
     local lock_data = _load_lock(lock_path)
     local state = _load_state(state_path)
+    local root_dependencies = _sorted_dependencies(_manifest_load(manifest_path), manifest_path, true)
     local ctx = {
         projectdir = projectdir,
         lock_path = lock_path,
         state_path = state_path,
         lock_data = lock_data,
         state = state,
+        root_dependencies = root_dependencies,
+        no_dev = opt.no_dev,
         force = opt.force,
         resolved = {},
         desired = {},
@@ -847,6 +920,14 @@ function run(opt)
         update_target = opt.update and opt.package or nil,
         update_matched = false
     }
+    -- 仅在写操作保存时持久化分类；status/list 仍然完全只读。
+    for key, entry in pairs(state.packages) do
+        local development = _is_development_key(ctx, key, entry) and true or nil
+        if entry.dev ~= development then
+            entry.dev = development
+            ctx.state_scope_changed = true
+        end
+    end
 
     if opt.status then
         _do_status(ctx, manifest_path)
@@ -890,8 +971,21 @@ function run(opt)
         raise("xspm: update package '%s' was not found", ctx.update_target)
     end
 
+    local synchronized = #table.keys(ctx.resolved)
     if opt.lock or (lock_data and opt.update) then
+        if ctx.no_dev and lock_data then
+            -- 跳过开发依赖不代表删除它们的锁定记录，包括暂时移出清单的开发包。
+            for key, entry in pairs(lock_data.packages) do
+                if not ctx.resolved[key] and _is_development_key(ctx, key, entry) then
+                    entry.dev = true
+                    ctx.resolved[key] = entry
+                end
+            end
+        end
         _save_lock(lock_path, ctx.resolved)
     end
-    cprint("${green}xspm: synchronized %d package(s)${clear}", #table.keys(ctx.resolved))
+    if ctx.state_scope_changed then
+        _save_state(state_path, state.packages)
+    end
+    cprint("${green}xspm: synchronized %d package(s)${clear}", synchronized)
 end

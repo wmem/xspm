@@ -33,6 +33,7 @@ task("xspm")
             {'p', "prune",  "k", nil, "Remove packages no longer declared by the current manifest tree."},
             {'c', "clean",  "k", nil, "Remove installed packages; PACKAGE limits removal to matching package subtrees."},
             {'f', "force",  "k", nil, "Allow destructive operations to discard local source changes."},
+            {nil, "no-dev", "k", nil, "Skip root development dependencies and preserve their installed files and lock entries."},
             {nil, "package", "v", nil, "Package selector used with --update, --reinit or --clean."}
         }
     }
@@ -48,6 +49,7 @@ task("xspm")
             prune   = option.get("prune") and true or false,
             clean   = option.get("clean") and true or false,
             force   = option.get("force") and true or false,
+            no_dev  = option.get("no-dev") and true or false,
             package = option.get("package")
         }
     end)

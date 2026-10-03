@@ -253,4 +253,5 @@ if (cd "$BASE/project" && "$XMAKE_BIN" xspm >/dev/null 2>&1); then
 fi
 
 bash "$ROOT/tests/regressions.sh"
+bash "$ROOT/tests/development.sh"
 echo "xspm tests passed"
