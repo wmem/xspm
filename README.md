@@ -1,5 +1,28 @@
 # xmake-xspm
 
+## Xmake Addon 命令
+
+本仓库提供 Addon `xspm`，安装后可以在消费工程中直接运行 `xmake xspm`，无需复制工具源码或在工程中 `includes()`。默认读取工程根目录 `xspm.json`，`--config=<路径>` 可选择其他配置；相对路径按工程根目录定位，其他目录执行时使用 `-P <工程目录>`。
+
+分发配方位于 [xmake-addons-repo](../xmake-addons-repo/README.md)，由工具自己的 [准备脚本](scripts/prepare-addon.lua)安装运行资源。现有工程内接入入口保持可用。以下说明只涉及新插件命令，公开规则和模块的 Addon 接入尚未迁移。
+
+```sh
+xmake xspm
+xmake xspm --config=xspm.json
+xmake xspm -P /path/to/project --help
+```
+
+指定清单后，根包路径按清单所在目录解析，`xspm-lock.json` 和 `.xspm/` 状态也写在该目录；子包仍读取其自身的 `xspm.json`。同目录的不同清单共用该锁文件与状态，不代表独立包管理空间。`--config` 的短选项是 `-C`，已有 `-c` 仍表示清理。
+
+本地开发需先准备完整插件目录，再交给 Xmake 安装。直接从源码 Git URL 或原始目录安装只会复制 Addon 内容，不执行分发配方，因此不会自动准备运行资源。
+
+```sh
+xmake lua scripts/prepare-addon.lua /tmp/xspm-addon-stage
+xmake addon --install /tmp/xspm-addon-stage
+```
+
+准备脚本拒绝覆盖已有输出目录。验证统一由索引仓库的 [插件集成测试](../xmake-addons-repo/tests/test_addons.py)覆盖，原有工具测试仍可独立执行。
+
 `xspm` 是 **xmake source package manager（xmake 源码包管理器）**的缩写。它是面向 xmake 项目的小型源码包管理器，管理基于 Git 的源码包，将包源码保存在项目目录树中，支持普通依赖与开发依赖、递归处理清单、可选的锁定机制以及包初始化钩子。
 
 它不负责决定包的编译方式。xspm 管理源码获取和生命周期，xmake 管理构建图。

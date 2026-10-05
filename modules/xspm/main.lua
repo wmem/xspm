@@ -893,7 +893,9 @@ function run(opt)
     _validate_action(opt)
 
     local projectdir = os.projectdir()
-    local manifest_path = path.join(projectdir, _MANIFEST_NAME)
+    local manifest_path = path.absolute(opt.config or _MANIFEST_NAME, projectdir)
+    -- 锁文件、状态和包目录按所选根清单所在目录组织；子清单行为不变。
+    projectdir = path.directory(manifest_path)
     local lock_path = path.join(projectdir, _LOCK_NAME)
     local state_path = path.join(projectdir, _STATE_FILE)
     if not os.isfile(manifest_path) then

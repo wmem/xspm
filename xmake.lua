@@ -25,6 +25,7 @@ task("xspm")
         usage = "xmake xspm [options] [package]",
         description = "Manage source packages declared by xspm.json.",
         options = {
+            {'C', "config", "kv", "xspm.json", "Manifest file, relative to the project root."},
             {'u', "update", "k", nil, "Resolve remote refs again; PACKAGE limits the update to that package subtree."},
             {'l', "lock",   "k", nil, "Resolve all refs, synchronize packages and create/refresh xspm-lock.json."},
             {'s', "status", "k", nil, "Check local package state without modifying files or accessing remotes."},
@@ -41,6 +42,7 @@ task("xspm")
         import("core.base.option")
         local main = import("xspm.main", {rootdir = path.join(_xspm_tooldir, "modules"), anonymous = true})
         main.run {
+            config = option.get("config"),
             update  = option.get("update") and true or false,
             lock    = option.get("lock") and true or false,
             status  = option.get("status") and true or false,
