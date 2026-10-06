@@ -48,6 +48,7 @@ xspm_include("deps/hal/xmake.lua")
 ```json
 {
   "version": 1,
+  "package": "my-project",
   "installDir": "deps",
   "dependencies": {
     "hal": "https://example.com/hal.git#main",
@@ -68,6 +69,22 @@ xspm_include("deps/hal/xmake.lua")
 ```
 
 字符串形式是 Git 源的简写，使用 `<installDir>/<name>` 作为安装路径。`installDir` 默认为 `deps`。
+
+`package` 是当前消费工程名称，也是所有安装源码包的本地开发分支名；需要使用 Addon xspm
+`0.1.1` 或对应新版工具源码。名称须为合法 Git 分支名，不能为 HEAD、空字符串或以 `-` 开头。
+顶层清单的名称统一作用于普通依赖、开发依赖及其递归子依赖；子清单自己的 package 只在它作为
+顶层工程使用时生效。使用 `--config` 时以选中的顶层清单为准，不从目录或 xmake.lua 推断名称。
+
+例如 package 为 gd32-template，而依赖 source 为 `<远程>#master`，管理器先解析 master 或
+读取锁文件中的提交，再在该提交上创建／复用本地 gd32-template 分支。远程 ref、本地开发分支
+和锁定提交是三个独立概念；不会因为本地分支名字而改从远程同名分支取代码。
+没有 package 的旧清单仍按确切提交游离检出；填写 package 后可直接在组件仓库开发、提交，
+首次推送使用 `git push -u origin <package>`。更新前应将开发提交推送并更新依赖 ref／SHA。
+
+同步会检查当前 HEAD 和目标工程分支的提交。已知的安装／锁定版本可以随配置更新或回退；
+目标包含现有提交时也可前进。存在不包含于目标的额外提交时拒绝切换，保留现有分支及源码，
+不会自动合并、rebase 或用 --force 丢弃提交。--force 仍只按原有约定处理未提交的工作区修改；
+工程分支模式下先完成提交保护检查，再清理工作区。更改 package 会创建／复用新名称，保留旧分支。
 
 Git 源支持 HTTPS、SSH、`file://` URL 和本地仓库路径，例如 `/share/repos/hal.git#main` 或 `../hal#main`。本地源的相对路径以声明它的 `xspm.json` 所在目录为基准解析，嵌套清单也遵循这一规则。锁文件和状态文件保留清单中声明的源字符串。本地源提供已提交的文件，工作区中未提交的修改不会被安装。
 
@@ -140,7 +157,8 @@ xmake xspm --lock
 
 xmake xspm --status
     检查包是否存在、origin、本地修改状态、锁文件与 HEAD 是否一致，以及初始化状态。
-    输出 SCOPE 列，区分 normal 与 dev；此命令不会修改包，也不会访问远端。
+    输出 SCOPE 和 BRANCH 列；配置 package 后分支不一致会报告 branch-mismatch。
+    此命令不会修改包，也不会访问远端。
 
 xmake xspm --list
     显示清单中声明的包目录树、源和引用、安装路径以及已知提交。
@@ -178,4 +196,7 @@ xmake 3.1.1 的任务选项不支持同一个选项既作为无值开关，又�
 
 ## 验证
 
-在本仓库根目录执行 `bash tests/run.sh`，需要 Bash、Git、xmake、Python 3、jq 和 rg。测试使用临时目录和本地 Git 远端，不安装全局工具。该入口包含已有集成与回归测试，以及 [开发依赖测试](tests/development.sh)，覆盖根项目与下游消费、开发工具的普通子依赖、范围筛选、锁定记录保留、类别迁移、初始化失败重试和清理保护。
+在本仓库根目录执行 `bash tests/run.sh`，需要 Bash、Git、xmake、uv/Python 3、jq 和 rg。测试使用临时目录和本地 Git 远端，不安装全局工具。该入口包含已有集成与回归测试、[开发依赖测试](tests/development.sh) 及 [工程分支测试](tests/test_package.py)，覆盖递归依赖、范围筛选、锁定记录保留、初始化失败重试、清理保护，以及首次分支创建、重复／离线同步、版本回退、现有分支与额外提交保护、推送后接入新 ref 和非法名称。
+
+2026-10-06，本机执行完整入口通过，包含原生命周期、回归与开发依赖套件，以及 16 项工程分支测试。
+源码版本 v0.3.0 对应新增 package 能力，Addon 分发版本为 0.1.1；两者版本独立维护。

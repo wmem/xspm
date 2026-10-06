@@ -86,6 +86,23 @@ local function _manifest_load(filepath)
     if data.version ~= nil and data.version ~= _FORMAT_VERSION then
         raise("xspm: unsupported manifest version in %s: %s", filepath, tostring(data.version))
     end
+    if data.package ~= nil then
+        local name = data.package
+        if type(name) ~= "string" or #name == 0 or name:sub(1, 1) == "-" or name == "HEAD" then
+            raise("xspm: package in %s must be a valid Git branch name", filepath)
+        end
+        -- 使用完整 ref 校验，避免 @{-1} 等分支表达式被 Git 展开。
+        local valid = false
+        try {
+            function ()
+                _git({"check-ref-format", "refs/heads/" .. name})
+                valid = true
+            end
+        }
+        if not valid then
+            raise("xspm: invalid package branch '%s' in %s", name, filepath)
+        end
+    end
     for _, field in ipairs({"dependencies", "devDependencies"}) do
         if data[field] == nil then
             data[field] = {}
@@ -266,7 +283,7 @@ local function _clean_untracked(repo)
     _git_in(repo, args)
 end
 
-local function _prepare_existing(repo, dep, force)
+local function _prepare_existing(repo, dep, force, defer_reset)
     if not _is_git_repo(repo) then
         raise("xspm: %s already exists but is not a git worktree", repo)
     end
@@ -282,18 +299,20 @@ local function _prepare_existing(repo, dep, force)
         if not force then
             raise("xspm: package '%s' has local changes in %s; use --force to discard them\n%s", dep.name, repo, dirty)
         end
-        cprint("${yellow}xspm: reset local changes: %s${clear}", repo)
-        _git_in(repo, {"reset", "--hard", "HEAD"})
-        _clean_untracked(repo)
+        if not defer_reset then
+            cprint("${yellow}xspm: reset local changes: %s${clear}", repo)
+            _git_in(repo, {"reset", "--hard", "HEAD"})
+            _clean_untracked(repo)
+        end
     end
 end
 
-local function _ensure_repo(repo, dep, force)
+local function _ensure_repo(repo, dep, force, defer_reset)
     if os.exists(repo) then
         if not os.isdir(repo) then
             raise("xspm: package path exists and is not a directory: %s", repo)
         end
-        _prepare_existing(repo, dep, force)
+        _prepare_existing(repo, dep, force, defer_reset)
         return false
     end
     os.mkdir(path.directory(repo))
@@ -364,14 +383,53 @@ local function _head(repo)
     return _trim(out)
 end
 
-local function _is_detached(repo)
-    local ok = _try_git_in(repo, {"symbolic-ref", "-q", "HEAD"})
-    return not ok
+local function _current_branch(repo)
+    local ok, out = _try_git_in(repo, {"symbolic-ref", "-q", "--short", "HEAD"})
+    return ok and _trim(out) or nil
 end
 
-local function _checkout(repo, dep, commit)
+local function _protect_commit(ctx, repo, dep, key, tip, commit, label)
+    if not tip or tip == commit then
+        return
+    end
+    -- 已由管理器安装或锁定的版本可以移动，包括显式选择较旧版本。
+    for _, entry in ipairs({ctx.state.packages[key] or {},
+                           ctx.lock_data and ctx.lock_data.packages[key] or {}}) do
+        if entry.source == dep.git and entry.commit == tip then
+            return
+        end
+    end
+    -- 目标包含现有提交时可以前进，例如本地开发提交已推送并更新了 ref。
+    if _try_git_in(repo, {"merge-base", "--is-ancestor", tip, commit}) then
+        return
+    end
+    raise("xspm: package '%s' %s has local or divergent commits at %s; push them and update the dependency ref, or resolve the branch manually (--force does not discard commits)",
+        dep.name, label, tip:sub(1, 12))
+end
+
+local function _checkout(ctx, repo, dep, key, commit, created)
     local current = _head(repo)
-    if current == commit and _is_detached(repo) then
+    local branch = _current_branch(repo)
+    if ctx.checkout_branch then
+        local wanted = ctx.checkout_branch
+        local exists, out = _try_git_in(repo, {"show-ref", "--verify", "--hash", "refs/heads/" .. wanted})
+        if not created then
+            _protect_commit(ctx, repo, dep, key, current, commit, branch or "HEAD")
+            if exists then
+                _protect_commit(ctx, repo, dep, key, _trim(out), commit, wanted)
+            end
+        end
+        -- 先确认不会覆盖额外提交，再处理显式 --force 要求丢弃的工作区修改。
+        _prepare_existing(repo, dep, ctx.force)
+        if current == commit and branch == wanted then
+            cprint("${green}xspm: ok %s [%s] @ %s${clear}", dep.name, wanted, commit:sub(1, 12))
+            return false
+        end
+        cprint("${cyan}xspm: checkout %s [%s] @ %s${clear}", dep.name, wanted, commit:sub(1, 12))
+        _git_in(repo, {"checkout", "--no-track", "-B", wanted, commit})
+        return current ~= commit
+    end
+    if current == commit and not branch then
         cprint("${green}xspm: ok %s @ %s${clear}", dep.name, commit:sub(1, 12))
         return false
     end
@@ -559,7 +617,7 @@ local function _sync_manifest(ctx, manifest_path, logical_parent, stack, depth, 
             ctx.update_matched = true
         end
 
-        local created = _ensure_repo(repo, dep, ctx.force)
+        local created = _ensure_repo(repo, dep, ctx.force, ctx.checkout_branch ~= nil)
         if created and ctx.state.packages[key] then
             -- 新工作区不能复用旧初始化状态；持久化以便后续失败重试也能正确初始化。
             ctx.state.packages[key] = nil
@@ -582,7 +640,7 @@ local function _sync_manifest(ctx, manifest_path, logical_parent, stack, depth, 
             commit = _fetch_ref(repo, dep.ref)
         end
 
-        _checkout(repo, dep, commit)
+        _checkout(ctx, repo, dep, key, commit, created)
         ctx.resolved[key] = {name = dep.name, source = dep.git, ref = dep.ref, commit = commit, dev = is_dev and true or nil}
         ctx.desired[key] = {name = dep.name, repo = repo, logical = logical, dep = dep, commit = commit, dev = is_dev}
 
@@ -661,6 +719,9 @@ local function _package_local_status(ctx, node)
             return "commit-mismatch", head
         end
     end
+    if ctx.checkout_branch and _current_branch(repo) ~= ctx.checkout_branch then
+        return "branch-mismatch", head
+    end
     local state = ctx.state.packages[key]
     if not state or not state.initialized or state.commit ~= head or state.source ~= dep.git then
         return "init-required", head
@@ -673,15 +734,16 @@ end
 
 local function _do_status(ctx, manifest_path)
     _collect_manifest_tree(ctx, manifest_path, "", 0)
-    cprint("${bright}PACKAGE  REF  STATUS  COMMIT  PATH  SCOPE${clear}")
+    cprint("${bright}PACKAGE  REF  STATUS  COMMIT  PATH  SCOPE  BRANCH${clear}")
     local bad = 0
     for _, node in ipairs(ctx.order) do
         local status, head = _package_local_status(ctx, node)
         if status ~= "ok" and status ~= "unlocked" then
             bad = bad + 1
         end
-        print(string.format("%s  %s  %s  %s  %s  %s", node.logical, node.dep.ref, status,
-            head and head:sub(1, 12) or "-", node.key, node.dev and "dev" or "normal"))
+        print(string.format("%s  %s  %s  %s  %s  %s  %s", node.logical, node.dep.ref, status,
+            head and head:sub(1, 12) or "-", node.key, node.dev and "dev" or "normal",
+            _current_branch(node.repo) or "(detached)"))
     end
     if bad > 0 then
         raise("xspm: %d package(s) require attention", bad)
@@ -904,7 +966,8 @@ function run(opt)
 
     local lock_data = _load_lock(lock_path)
     local state = _load_state(state_path)
-    local root_dependencies = _sorted_dependencies(_manifest_load(manifest_path), manifest_path, true)
+    local root_manifest = _manifest_load(manifest_path)
+    local root_dependencies = _sorted_dependencies(root_manifest, manifest_path, true)
     local ctx = {
         projectdir = projectdir,
         lock_path = lock_path,
@@ -912,6 +975,7 @@ function run(opt)
         lock_data = lock_data,
         state = state,
         root_dependencies = root_dependencies,
+        checkout_branch = root_manifest.package,
         no_dev = opt.no_dev,
         force = opt.force,
         resolved = {},

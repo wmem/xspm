@@ -254,4 +254,5 @@ fi
 
 bash "$ROOT/tests/regressions.sh"
 bash "$ROOT/tests/development.sh"
+uv run --no-project python "$ROOT/tests/test_package.py"
 echo "xspm tests passed"
